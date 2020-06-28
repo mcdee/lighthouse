@@ -313,6 +313,7 @@ impl<TSpec: EthSpec> Behaviour<TSpec> {
 
     /// Subscribes to a specific subnet id;
     pub fn subscribe_to_subnet(&mut self, subnet_id: SubnetId) -> bool {
+        dbg!("SUBSCRIBING TO SUBNET");
         let topic = GossipTopic::new(
             subnet_id.into(),
             GossipEncoding::default(),
@@ -333,6 +334,7 @@ impl<TSpec: EthSpec> Behaviour<TSpec> {
 
     /// Subscribes to a gossipsub topic.
     fn subscribe(&mut self, topic: GossipTopic) -> bool {
+        dbg!("SUBSCRIBING TO SUBNET");
         // update the network globals
         self.network_globals
             .gossipsub_subscriptions
@@ -340,7 +342,10 @@ impl<TSpec: EthSpec> Behaviour<TSpec> {
             .insert(topic.clone());
 
         let topic_str: String = topic.clone().into();
+        dbg!(&topic_str);
+        dbg!("DEBUG HERE");
         debug!(self.log, "Subscribed to topic"; "topic" => topic_str);
+        dbg!("SUBSCRIBED!!!!");
         self.gossipsub.subscribe(topic.into())
     }
 

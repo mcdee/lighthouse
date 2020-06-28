@@ -408,6 +408,8 @@ impl<TSpec: EthSpec> Discovery<TSpec> {
             };
             // update the metrics and insert into the queue.
             metrics::set_gauge(&metrics::DISCOVERY_QUEUE, self.queued_queries.len() as i64);
+            dbg!("ADDING SUBNET QUERY");
+            dbg!(&query);
             self.queued_queries.push_back(query);
         }
     }
