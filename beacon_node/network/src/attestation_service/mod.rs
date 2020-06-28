@@ -475,6 +475,7 @@ impl<T: BeaconChainTypes> AttestationService<T> {
     ///
     /// This also updates the ENR to indicate our long-lived subscription to the subnet
     fn add_known_validator(&mut self, validator_index: u64) {
+        dbg!("ADDING KNOWN VALIDATOR");
         if self.known_validators.get(&validator_index).is_none() {
             // New validator has subscribed
             // Subscribe to random topics and update the ENR if needed.
@@ -494,6 +495,7 @@ impl<T: BeaconChainTypes> AttestationService<T> {
 
     /// Subscribe to long-lived random subnets and update the local ENR bitfield.
     fn subscribe_to_random_subnets(&mut self, no_subnets_to_subscribe: usize) {
+        dbg!("SUBSCRIBING TO RANDOM SUBNETS");
         let subnet_count = self.beacon_chain.spec.attestation_subnet_count;
 
         // Build a list of random subnets that we are not currently subscribed to.
@@ -536,11 +538,14 @@ impl<T: BeaconChainTypes> AttestationService<T> {
                 .find(|topic| topic.kind() == topic_kind)
                 .is_some();
 
+            dbg!("STILL SUBSCRIBING TO RANDOM SUBNETS");
+
             if !already_subscribed {
                 // send a discovery request and a subscription
                 self.send_or_update_discovery_event(subnet_id, None);
                 self.events
                     .push_back(AttServiceMessage::Subscribe(subnet_id));
+                dbg!("ADDED SUBSCRIPTION");
             }
             // add the subnet to the ENR bitfield
             self.events.push_back(AttServiceMessage::EnrAdd(subnet_id));

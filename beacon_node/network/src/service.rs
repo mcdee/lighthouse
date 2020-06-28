@@ -220,6 +220,7 @@ fn spawn_service<T: BeaconChainTypes>(
                     match attestation_service_message {
                         // TODO: Implement
                         AttServiceMessage::Subscribe(subnet_id) => {
+                            dbg!("NETWORK RECEIVED");
                             service.libp2p.swarm.subscribe_to_subnet(subnet_id);
                         }
                         AttServiceMessage::Unsubscribe(subnet_id) => {
