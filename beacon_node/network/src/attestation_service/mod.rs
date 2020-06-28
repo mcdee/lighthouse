@@ -771,6 +771,8 @@ impl<T: BeaconChainTypes> Stream for AttestationService<T> {
 
         // process any generated events
         if let Some(event) = self.events.pop_front() {
+            dbg!("EVENT RETURNED");
+            dbg!(&event);
             return Poll::Ready(Some(event));
         }
 

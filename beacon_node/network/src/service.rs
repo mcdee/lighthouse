@@ -217,6 +217,8 @@ fn spawn_service<T: BeaconChainTypes>(
                 }
                 // process any attestation service events
                 Some(attestation_service_message) = service.attestation_service.next() => {
+                    dbg!("GOT EVENT NETWORK");
+                    dbg!(&attestation_service_message);
                     match attestation_service_message {
                         // TODO: Implement
                         AttServiceMessage::Subscribe(subnet_id) => {
