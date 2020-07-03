@@ -16,6 +16,9 @@ beacon_chain = { path = "..", features = ["arbitrary"] }
 # Prevent this from interfering with workspaces
 # [workspace]
 # members = ["."]
+[[bin]]
+name = "parse_exec"
+path = "src/parse_exec.rs"
 
 [[bin]]
 name = "bincode_exec"
@@ -28,3 +31,4 @@ name = "example_maker"
 path = "fuzz_targets/example_maker.rs"
 test = false
 doc = false
+

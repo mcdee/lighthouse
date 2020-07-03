@@ -1,4 +1,5 @@
 use crate::{
+    attestation_verification::VerifiedAggregatedAttestation, beacon_chain::HeadInfo,
     builder::BeaconChainBuilder, eth1_chain::CachingEth1Backend, events::NullEventHandler,
     migrate::NullMigrator, BeaconChain,
 };
@@ -7,6 +8,9 @@ use lazy_static::lazy_static;
 use serde_derive::{Deserialize, Serialize};
 use sloggers::{null::NullLoggerBuilder, Build};
 use slot_clock::{SlotClock, TestingSlotClock};
+use state_processing::per_slot_processing;
+use std::borrow::Cow;
+use std::convert::TryInto;
 use std::sync::Arc;
 use std::time::Duration;
 use store::{config::StoreConfig, HotColdDB, MemoryStore};
@@ -25,6 +29,11 @@ lazy_static! {
         generate_deterministic_keypairs(INITIAL_VALIDATOR_COUNT);
 }
 
+/// Get the secret key for a validator.
+fn sk(validator_index: usize) -> &'static SecretKey {
+    &KEYPAIRS[validator_index].sk
+}
+
 type E = MinimalEthSpec;
 pub type Witness = crate::builder::Witness<
     // BlockingMigrator<E, MemoryStore<E>, MemoryStore<E>>,
@@ -37,13 +46,51 @@ pub type Witness = crate::builder::Witness<
     MemoryStore<E>,
 >;
 
+/// What should happen with block production at a single slot on a single chain?
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub enum BlockEvent {
+    ProduceBlock,
+    SkipSlot,
+    NewSkipFork,
+}
+
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct AttestationEvent {
+    // NOTE: tweak type width if running with larger validator counts
+    committee_bitfield: u8,
+}
+
+impl AttestationEvent {
+    fn new(committee_bitfield: u8) -> Self {
+        Self { committee_bitfield }
+    }
+
+    fn is_attester(&self, committee_position: usize) -> bool {
+        self.committee_bitfield
+            .checked_shr(committee_position.try_into().unwrap())
+            .unwrap()
+            & 1
+            == 1
+    }
+}
+
 /// An event occuring on a single chain.
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
-pub enum ChainEvent {
-    ProduceBlock,
-    SkipSlot,
-    // NewSkipFork,
+pub struct ChainEvent {
+    block_event: BlockEvent,
+    attestation_event: AttestationEvent,
+}
+
+impl ChainEvent {
+    fn full_participation() -> Self {
+        Self {
+            block_event: BlockEvent::ProduceBlock,
+            attestation_event: AttestationEvent::new(0xff),
+        }
+    }
 }
 
 /// All the events occuring during a single slot, for each chain.
@@ -80,26 +127,26 @@ impl Execution {
 
         let mut max_num_forks = 1;
         for slot_event in &self.slot_events {
-            if slot_event.chain_events.is_empty() || slot_event.chain_events.len() != max_num_forks
-            {
+            if slot_event.chain_events.is_empty() || slot_event.chain_events.len() > max_num_forks {
                 return false;
             }
-            /*
             max_num_forks += slot_event
                 .chain_events
                 .iter()
-                .filter(|ev| ev == ChainEvent::NewSkipFork)
+                .filter(|ev| ev.block_event == BlockEvent::NewSkipFork)
                 .count();
-            */
         }
         true
     }
 }
 
 pub struct Harness {
+    /// Beacon chain under test.
+    pub chain: BeaconChain<Witness>,
     /// Hash of the block at the head of each chain.
     pub forks: Vec<Hash256>,
-    pub chain: BeaconChain<Witness>,
+    /// Last observed finalized checkpoint.
+    pub last_finalized_checkpoint: Option<Checkpoint>,
     pub data_dir: TempDir,
 }
 
@@ -135,8 +182,9 @@ impl Harness {
         let forks = vec![chain.head_info().unwrap().block_root];
 
         Self {
-            forks,
             chain,
+            forks,
+            last_finalized_checkpoint: None,
             data_dir,
         }
     }
@@ -152,37 +200,58 @@ impl Harness {
         for slot_event in exec.slot_events {
             let slot = self.chain.slot_clock.now().unwrap();
             self.apply_slot_event(slot, slot_event);
+
+            self.chain.fork_choice().unwrap();
+
+            self.check_slot_invariants();
+
             self.chain.slot_clock.advance_slot();
         }
+
+        self.check_invariants();
     }
 
     fn apply_slot_event(&mut self, slot: Slot, slot_event: SlotEvent) {
         for (chain_id, chain_event) in slot_event.chain_events.into_iter().enumerate() {
-            // TODO: remove this unwrap
-            self.apply_chain_event(slot, chain_id, chain_event).unwrap();
+            self.apply_chain_event(slot, chain_id, chain_event);
         }
     }
 
-    fn apply_chain_event(
+    fn apply_chain_event(&mut self, slot: Slot, chain_id: usize, chain_event: ChainEvent) {
+        if let Some((block_root, state)) =
+            self.apply_block_event(slot, chain_id, chain_event.block_event)
+        {
+            self.apply_attestation_event(slot, block_root, state, chain_event.attestation_event);
+        }
+    }
+
+    // Return (new_head_block_root, new_head_state)
+    fn apply_block_event(
         &mut self,
         slot: Slot,
         chain_id: usize,
-        chain_event: ChainEvent,
-    ) -> Option<()> {
-        use ChainEvent::*;
+        block_event: BlockEvent,
+    ) -> Option<(Hash256, BeaconState<E>)> {
+        use BlockEvent::*;
 
-        match chain_event {
-            SkipSlot => Some(()),
-            ProduceBlock => {
-                let parent_block_root = &self.forks[chain_id];
-                let parent_block = self.chain.get_block(parent_block_root).unwrap()?;
-                let parent_state = self
-                    .chain
-                    .get_state(&parent_block.state_root(), Some(parent_block.slot()))
-                    .unwrap()
-                    .unwrap();
+        let parent_block_root = self.forks[chain_id];
+        // TODO: handle pruning
+        let parent_block = self.chain.get_block(&parent_block_root).unwrap().unwrap();
+        let mut parent_state = self
+            .chain
+            .get_state(&parent_block.state_root(), Some(parent_block.slot()))
+            .unwrap()
+            .unwrap();
 
-                // TODO: deal with long skips
+        // Advance state to proposal epoch so we can get the proposer index.
+        while parent_state.current_epoch() < slot.epoch(E::slots_per_epoch()) {
+            per_slot_processing(&mut parent_state, None, self.spec()).unwrap();
+        }
+
+        // Apply the block event.
+        match block_event {
+            SkipSlot => Some((parent_block_root, parent_state)),
+            ProduceBlock | NewSkipFork => {
                 let proposer_idx = parent_state
                     .get_beacon_proposer_index(slot, self.spec())
                     .unwrap();
@@ -193,21 +262,192 @@ impl Harness {
                     .produce_block_on_state(parent_state, slot, randao_reveal)
                     .unwrap();
                 let signed_block = block.sign(
-                    &KEYPAIRS[proposer_idx].sk,
+                    sk(proposer_idx),
                     &state.fork,
                     state.genesis_validators_root,
                     self.spec(),
                 );
 
-                let block_root = self.chain.process_block(signed_block).unwrap();
+                let block_root = self.chain.process_block(signed_block).ok()?;
                 self.forks[chain_id] = block_root;
-                Some(())
-            } // NewSkipFork => Some(()),
+
+                // TODO: allow attestations to skipped slot
+                if block_event == NewSkipFork {
+                    self.forks.push(parent_block_root);
+                }
+
+                Some((block_root, state))
+            }
         }
     }
 
-    fn spec(&self) -> &ChainSpec {
-        &self.chain.spec
+    /// Generate attestations and supply them to fork choice and the op-pool.
+    ///
+    /// Return `None` if the attestations were impossible to create/apply.
+    fn apply_attestation_event(
+        &mut self,
+        slot: Slot,
+        head_block_root: Hash256,
+        state: BeaconState<E>,
+        attestation_event: AttestationEvent,
+    ) -> Option<()> {
+        for committee in state.get_beacon_committees_at_slot(slot).unwrap() {
+            let mut attestation = self
+                .chain
+                .produce_unaggregated_attestation_for_block(
+                    slot,
+                    committee.index,
+                    head_block_root,
+                    Cow::Borrowed(&state),
+                )
+                .unwrap();
+
+            for (i, &validator_index) in committee
+                .committee
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| attestation_event.is_attester(*i))
+            {
+                attestation
+                    .sign(
+                        sk(validator_index),
+                        i,
+                        &state.fork,
+                        state.genesis_validators_root,
+                        self.spec(),
+                    )
+                    .unwrap();
+            }
+
+            let aggregator_index = committee
+                .committee
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| attestation_event.is_attester(*i))
+                .find(|(_, validator_index)| {
+                    let selection_proof = SelectionProof::new::<E>(
+                        slot,
+                        sk(**validator_index),
+                        &state.fork,
+                        state.genesis_validators_root,
+                        self.spec(),
+                    );
+
+                    selection_proof
+                        .is_aggregator(committee.committee.len(), self.spec())
+                        .unwrap_or(false)
+                })
+                .map(|(_, validator_index)| *validator_index)?;
+
+            let signed_aggregate = SignedAggregateAndProof::from_aggregate(
+                aggregator_index as u64,
+                attestation,
+                None,
+                sk(aggregator_index),
+                &state.fork,
+                state.genesis_validators_root,
+                self.spec(),
+            );
+
+            // Verifying the attestation may not succeed, particularly with forking, so we just
+            // ignore failures and keep running.
+            let verified_attestation =
+                VerifiedAggregatedAttestation::verify(signed_aggregate, &self.chain).ok()?;
+
+            self.chain
+                .apply_attestation_to_fork_choice(&verified_attestation)
+                .ok()?;
+            self.chain
+                .add_to_block_inclusion_pool(verified_attestation)
+                .ok()?;
+        }
+        Some(())
+    }
+
+    /// Check invariants at each slot of the
+    fn check_slot_invariants(&mut self) {
+        self.check_finalization_linearity();
+    }
+
+    /// Check that the chain's finalized checkpoint is descended from the last finalized checkpoint.
+    fn check_finalization_linearity(&mut self) {
+        let new_checkpoint = self.head_info().finalized_checkpoint;
+        self.last_finalized_checkpoint
+            .replace(new_checkpoint)
+            .map(|old_checkpoint| {
+                assert!(new_checkpoint.epoch >= old_checkpoint.epoch);
+                // TODO: map zero to genesis block root
+                if !old_checkpoint.root.is_zero() && !new_checkpoint.root.is_zero() {
+                    assert_eq!(
+                        self.get_ancestor(
+                            new_checkpoint.root,
+                            old_checkpoint.epoch.start_slot(E::slots_per_epoch())
+                        ),
+                        Some(old_checkpoint.root)
+                    );
+                }
+            });
+    }
+
+    /// Check invariants at the end of an execution.
+    fn check_invariants(&self) {
+        self.check_integrity_of_all_forks();
+    }
+
+    fn check_integrity_of_all_forks(&self) {
+        for &head_block_root in &self.forks {
+            if !self.chain.knows_head(&head_block_root.into()) {
+                assert_eq!(self.chain.get_block(&head_block_root).unwrap(), None);
+                continue;
+            }
+
+            self.check_block_root_iterators(head_block_root);
+        }
+    }
+
+    /// Check the forwards and backwards block iterators from `head_block_root`.
+    ///
+    /// Return the vector of all block roots from genesis, in ascending order.
+    fn check_block_root_iterators(&self, head_block_root: Hash256) -> Vec<(Hash256, Slot)> {
+        // Block roots from the reverse iterator, but in ascending order.
+        let mut rev_block_roots = self
+            .chain
+            .rev_iter_block_roots_from(head_block_root)
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+        rev_block_roots.reverse();
+
+        // Ends at the head of the fork.
+        let (last_root, last_slot) = rev_block_roots.last().unwrap().clone();
+        assert_eq!(last_root, head_block_root);
+        // Length equal to the number of slots plus 1.
+        assert_eq!(rev_block_roots.len(), last_slot.as_usize() + 1);
+        // Reaches genesis.
+        assert_eq!(rev_block_roots.first().unwrap().1, 0);
+
+        // Is equal to the forwards iterator.
+        let head_block = self.chain.get_block(&head_block_root).unwrap().unwrap();
+        assert_eq!(head_block.slot(), last_slot);
+        let head_state = self
+            .chain
+            .get_state(&head_block.state_root(), Some(head_block.slot()))
+            .unwrap()
+            .unwrap();
+        let forward_block_roots = HotColdDB::forwards_block_roots_iterator(
+            self.chain.store.clone(),
+            Slot::new(0),
+            head_state,
+            head_block_root,
+            self.spec(),
+        )
+        .unwrap()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+
+        assert_eq!(rev_block_roots, forward_block_roots);
+
+        forward_block_roots
     }
 
     fn randao_reveal(&self, validator_idx: usize, slot: Slot, state: &BeaconState<E>) -> Signature {
@@ -219,7 +459,23 @@ impl Harness {
             state.genesis_validators_root,
         );
         let message = epoch.signing_root(domain);
-        Signature::new(message.as_bytes(), &KEYPAIRS[validator_idx].sk)
+        Signature::new(message.as_bytes(), sk(validator_idx))
+    }
+
+    fn head_info(&self) -> HeadInfo {
+        self.chain.head_info().unwrap()
+    }
+
+    fn spec(&self) -> &ChainSpec {
+        &self.chain.spec
+    }
+
+    fn get_ancestor(&self, block_root: Hash256, ancestor_slot: Slot) -> Option<Hash256> {
+        self.chain
+            .fork_choice
+            .read()
+            .get_ancestor(block_root, ancestor_slot)
+            .unwrap()
     }
 }
 
@@ -229,32 +485,92 @@ impl Execution {
         Execution {
             slot_events: vec![
                 SlotEvent {
-                    chain_events: vec![ChainEvent::ProduceBlock]
+                    chain_events: vec![ChainEvent::full_participation()]
                 };
                 num_slots
             ],
         }
     }
 
+    // FIXME: hardcoded
     pub fn hop_skip_jump(hop: usize, skip: usize, jump: usize) -> Self {
         let mut slot_events = vec![];
         slot_events.extend(vec![
             SlotEvent {
-                chain_events: vec![ChainEvent::ProduceBlock],
+                chain_events: vec![ChainEvent::full_participation()]
             };
             hop
         ]);
         slot_events.extend(vec![
             SlotEvent {
-                chain_events: vec![ChainEvent::SkipSlot],
+                chain_events: vec![ChainEvent {
+                    block_event: BlockEvent::SkipSlot,
+                    attestation_event: AttestationEvent::new(0xff),
+                }]
             };
             skip
         ]);
         slot_events.extend(vec![
             SlotEvent {
-                chain_events: vec![ChainEvent::ProduceBlock],
+                chain_events: vec![ChainEvent::full_participation()],
             };
             jump
+        ]);
+        Execution { slot_events }
+    }
+
+    pub fn minority_fork(
+        initial_length: usize,
+        minority_fork_len: usize,
+        majority_fork_len: usize,
+    ) -> Self {
+        use std::cmp::{max, min};
+
+        let mut slot_events = vec![];
+        slot_events.extend(vec![
+            SlotEvent {
+                chain_events: vec![ChainEvent::full_participation()]
+            };
+            initial_length
+        ]);
+        slot_events.push(SlotEvent {
+            chain_events: vec![ChainEvent {
+                block_event: BlockEvent::NewSkipFork,
+                attestation_event: AttestationEvent::new(0xff),
+            }],
+        });
+        slot_events.extend(vec![
+            SlotEvent {
+                // Majority fork on chain 0 without the skip, half the attestations each.
+                chain_events: vec![
+                    ChainEvent {
+                        block_event: BlockEvent::ProduceBlock,
+                        attestation_event: AttestationEvent::new(0b01),
+                    },
+                    ChainEvent {
+                        block_event: BlockEvent::ProduceBlock,
+                        attestation_event: AttestationEvent::new(0b10),
+                    },
+                ],
+            };
+            min(minority_fork_len, majority_fork_len)
+        ]);
+        slot_events.extend(vec![
+            SlotEvent {
+                // Majority fork gets all the attestations.
+                chain_events: vec![
+                    ChainEvent {
+                        block_event: BlockEvent::ProduceBlock,
+                        attestation_event: AttestationEvent::new(0xff),
+                    },
+                    ChainEvent {
+                        block_event: BlockEvent::ProduceBlock,
+                        attestation_event: AttestationEvent::new(0b00),
+                    },
+                ],
+            };
+            max(minority_fork_len, majority_fork_len)
+                - min(minority_fork_len, majority_fork_len)
         ]);
         Execution { slot_events }
     }
@@ -275,10 +591,12 @@ mod manual_execution {
         serialize_into(&mut f, exec).unwrap();
     }
 
-    fn exec_test(name: &str, exec: Execution) {
+    fn exec_test(name: &str, exec: Execution) -> Harness {
         let mut harness = Harness::new();
         write_to_file(name, &exec);
+        assert!(exec.is_well_formed());
         harness.apply_execution(exec);
+        harness
     }
 
     #[test]
@@ -325,5 +643,21 @@ mod manual_execution {
                 2 * slots_per_epoch,
             ),
         );
+    }
+
+    #[test]
+    fn minority_fork_1_2_5() {
+        let slots_per_epoch = E::slots_per_epoch() as usize;
+        let harness = exec_test(
+            "minority_fork_1_2_5.bin",
+            Execution::minority_fork(
+                1 * slots_per_epoch,
+                2 * slots_per_epoch,
+                5 * slots_per_epoch,
+            ),
+        );
+        let head_info = harness.chain.head_info().unwrap();
+        assert_eq!(head_info.slot, Slot::from(6 * slots_per_epoch + 1));
+        assert_eq!(head_info.finalized_checkpoint.epoch, 4);
     }
 }
