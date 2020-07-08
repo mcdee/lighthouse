@@ -67,6 +67,7 @@ pub enum DelegateIn<TSpec: EthSpec> {
 
 /// Wrapper around the `ProtocolsHandler::OutEvent` types of the handlers.
 /// Simply delegated to the corresponding behaviour's handler.
+#[derive(Debug)]
 pub enum DelegateOut<TSpec: EthSpec> {
     Gossipsub(<GossipHandler as ProtocolsHandler>::OutEvent),
     RPC(<RPCHandler<TSpec> as ProtocolsHandler>::OutEvent),

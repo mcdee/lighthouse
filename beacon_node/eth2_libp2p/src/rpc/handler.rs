@@ -41,6 +41,7 @@ const SHUTDOWN_TIMEOUT_SECS: u8 = 15;
 pub struct SubstreamId(usize);
 
 /// An error encountered by the handler.
+#[derive(Debug)]
 pub enum HandlerErr {
     /// An error occurred for this peer's request. This can occur during protocol negotiation,
     /// message passing, or if the handler identifies that we are sending an error response to the peer.

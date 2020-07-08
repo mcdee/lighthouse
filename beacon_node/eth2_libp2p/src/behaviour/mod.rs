@@ -711,6 +711,7 @@ impl<TSpec: EthSpec> NetworkBehaviour for Behaviour<TSpec> {
     ) {
         // If the peer is banned, send a goodbye and disconnect.
         if self.peer_manager.is_banned(peer_id) {
+            slog::warn!(self.log, "Banned peer attempted connection"; "peer_id" => peer_id.to_string());
             self.peers_to_dc.push_back(peer_id.clone());
             // send a goodbye on all possible handlers for this peer
             self.handler_events.push_back(NBAction::NotifyHandler {
@@ -737,7 +738,6 @@ impl<TSpec: EthSpec> NetworkBehaviour for Behaviour<TSpec> {
                 debug!(self.log, "Connection established"; "peer_id" => peer_id.to_string(), "connection" => "Dialed");
             }
         }
-        // report the event to the application
 
         delegate_to_behaviours!(
             self,
@@ -798,13 +798,13 @@ impl<TSpec: EthSpec> NetworkBehaviour for Behaviour<TSpec> {
         conn_id: ConnectionId,
         event: <Self::ProtocolsHandler as ProtocolsHandler>::OutEvent,
     ) {
-        // All events from banned peers are rejected
         if self.peer_manager.is_banned(&peer_id) {
+            slog::warn!(self.log, "Banned peer event"; "peer_id" => peer_id.to_string(), "event" => format!("{:?}", event));
             return;
         }
 
         match event {
-            // Events comming from the handler, redirected to each behaviour
+            // Events coming from the handler, redirected to each behaviour
             BehaviourHandlerOut::Delegate(delegate) => match *delegate {
                 DelegateOut::Gossipsub(ev) => self.gossipsub.inject_event(peer_id, conn_id, ev),
                 DelegateOut::RPC(ev) => self.eth2_rpc.inject_event(peer_id, conn_id, ev),

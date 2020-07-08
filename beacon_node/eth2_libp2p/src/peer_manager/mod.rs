@@ -345,7 +345,7 @@ impl<TSpec: EthSpec> PeerManager<TSpec> {
                 Protocol::MetaData => return,
                 Protocol::Status => return,
             },
-            RPCError::NegotiationTimeout => PeerAction::HighToleranceError,
+            RPCError::NegotiationTimeout => PeerAction::Fatal,
         };
 
         self.report_peer(peer_id, peer_action);

@@ -41,6 +41,7 @@ pub enum BehaviourHandlerIn<TSpec: EthSpec> {
     Shutdown(Option<(RequestId, RPCRequest<TSpec>)>),
 }
 
+#[derive(Debug)]
 pub enum BehaviourHandlerOut<TSpec: EthSpec> {
     Delegate(Box<DelegateOut<TSpec>>),
     // TODO: replace custom with events to send
