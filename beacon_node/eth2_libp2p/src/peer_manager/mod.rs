@@ -40,7 +40,7 @@ const PING_INTERVAL: u64 = 30;
 
 /// The heartbeat performs regular updates such as updating reputations and performing discovery
 /// requests. This defines the interval in seconds.  
-const HEARTBEAT_INTERVAL: u64 = 30;
+const HEARTBEAT_INTERVAL: u64 = 20;
 
 /// The main struct that handles peer's reputation and connection status.
 pub struct PeerManager<TSpec: EthSpec> {

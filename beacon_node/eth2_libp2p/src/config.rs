@@ -107,10 +107,10 @@ impl Default for Config {
             .request_retries(2)
             .enr_peer_update_min(2) // prevents NAT's should be raised for mainnet
             .query_parallelism(5)
-            .query_timeout(Duration::from_secs(30))
-            .query_peer_timeout(Duration::from_secs(2))
+            .query_timeout(Duration::from_secs(10))
+            .query_peer_timeout(Duration::from_secs(1))
             .ip_limit() // limits /24 IP's in buckets.
-            .ping_interval(Duration::from_secs(300))
+            .ping_interval(Duration::from_secs(10))
             .build();
 
         // NOTE: Some of these get overridden by the corresponding CLI default values.
