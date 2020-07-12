@@ -758,6 +758,7 @@ dependencies = [
  "prometheus",
  "reqwest",
  "rest_api",
+ "rest_types",
  "serde",
  "serde_derive",
  "serde_yaml",

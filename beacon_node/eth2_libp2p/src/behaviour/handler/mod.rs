@@ -77,7 +77,7 @@ impl<TSpec: EthSpec> ProtocolsHandler for BehaviourHandler<TSpec> {
     fn inject_event(&mut self, event: Self::InEvent) {
         match event {
             BehaviourHandlerIn::Delegate(delegated_ev) => self.delegate.inject_event(delegated_ev),
-            /* Events comming from the behaviour */
+            /* Events coming from the behaviour */
             BehaviourHandlerIn::Shutdown(last_message) => {
                 self.shutting_down = true;
                 self.delegate.rpc_mut().shutdown(last_message);

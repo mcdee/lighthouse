@@ -3,6 +3,7 @@ use beacon_chain::{BeaconChain, BeaconChainTypes};
 use eth2_libp2p::NetworkGlobals;
 use futures::prelude::*;
 use parking_lot::Mutex;
+use rest_types::Health;
 use slog::{debug, error, info, warn};
 use slot_clock::SlotClock;
 use std::sync::Arc;
@@ -138,6 +139,8 @@ pub fn spawn_notifier<T: BeaconChainTypes>(
                     } else {
                         format!("{}", head_root)
                     };
+                    let health = Health::observe();
+                    let cpu_usage = health.map(|h| h.sys_loadavg_1).unwrap_or_else(|_| 0.0);
                     info!(
                         log,
                         "Synced";
@@ -147,6 +150,7 @@ pub fn spawn_notifier<T: BeaconChainTypes>(
                         "epoch" => current_epoch,
                         "block" => block_info,
                         "slot" => current_slot,
+                        "cpu" => cpu_usage,
                     );
                 } else {
                     info!(

@@ -10,6 +10,7 @@ toml = "0.5.6"
 
 [dependencies]
 beacon_chain = { path = "../beacon_chain" }
+rest_types = { path = "../../common/rest_types" }
 store = { path = "../store" }
 network = { path = "../network" }
 timer = { path = "../timer" }

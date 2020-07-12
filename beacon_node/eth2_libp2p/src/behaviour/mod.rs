@@ -687,11 +687,19 @@ impl<TSpec: EthSpec> NetworkBehaviour for Behaviour<TSpec> {
         conn_id: &ConnectionId,
         endpoint: &ConnectedPoint,
     ) {
+        if self.peer_manager.is_banned(peer_id) {
+            slog::warn!(self.log, "Peer closed, but banned ignoring update"; "peer_id" => peer_id.to_string());
+            return;
+        }
         delegate_to_behaviours!(self, inject_connection_closed, peer_id, conn_id, endpoint);
     }
 
     // This gets called once there are no more active connections.
     fn inject_disconnected(&mut self, peer_id: &PeerId) {
+        if self.peer_manager.is_banned(peer_id) {
+            slog::warn!(self.log, "Peer disconnected, but banned ignoring update"; "peer_id" => peer_id.to_string());
+            return;
+        }
         // Inform the peer manager.
         self.peer_manager.notify_disconnect(&peer_id);
         // Inform the application.
@@ -717,8 +725,8 @@ impl<TSpec: EthSpec> NetworkBehaviour for Behaviour<TSpec> {
     ) {
         // If the peer is banned, send a goodbye and disconnect.
         if self.peer_manager.is_banned(peer_id) {
-            self.peers_to_dc.push_back(peer_id.clone());
             // send a goodbye on all possible handlers for this peer
+            slog::warn!(self.log, "Connecting peer banned. Disconnecting"; "peer_id" => peer_id.to_string());
             self.handler_events.push_back(NBAction::NotifyHandler {
                 peer_id: peer_id.clone(),
                 handler: NotifyHandler::All,
@@ -758,6 +766,7 @@ impl<TSpec: EthSpec> NetworkBehaviour for Behaviour<TSpec> {
         // Drop any connection from a banned peer. The goodbye and disconnects are handled in
         // `inject_connection_established()`, which gets called first.
         if self.peer_manager.is_banned(peer_id) {
+            slog::warn!(self.log, "Connecting peer first time banned. Ignoring message"; "peer_id" => peer_id.to_string());
             return;
         }
 
@@ -813,6 +822,7 @@ impl<TSpec: EthSpec> NetworkBehaviour for Behaviour<TSpec> {
     ) {
         // All events from banned peers are rejected
         if self.peer_manager.is_banned(&peer_id) {
+            slog::warn!(self.log, "Message from banned peer ignored"; "peer_id" => peer_id.to_string());
             return;
         }
 

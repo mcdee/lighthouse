@@ -317,7 +317,7 @@ where
     /// Initiates the handler's shutdown process, sending an optional last message to the peer.
     pub fn shutdown(&mut self, final_msg: Option<(RequestId, RPCRequest<TSpec>)>) {
         if matches!(self.state, HandlerState::Active) {
-            debug!(self.log, "Starting handler shutdown"; "unsent_queued_requests" => self.dial_queue.len());
+            debug!(self.log, "Starting handler shutdown"; "unsent_queued_requests" => self.dial_queue.len(), "final_msg"=> format!("{:?}", final_msg));
             // we now drive to completion communications already dialed/established
             while let Some((id, req)) = self.dial_queue.pop() {
                 self.pending_errors.push(HandlerErr::Outbound {
